@@ -200,7 +200,7 @@ public static class SongSorterCore
                         {
                             ct.ThrowIfCancellationRequested();
 
-                            List<(string SubtitleNorm, int Index)>? versions = null;
+                            List<(string SubtitleNorm, int Index, string DisplayTitle, string DisplaySubtitle)>? versions = null;
                             string foundTitleKey = string.Empty;
                             var lookupKeys = BuildTitleLookupKeys(candidate.TitleNorm, candidate.SubtitleNorm, candidate.FullTitleNorm);
                             foreach (var titleKey in lookupKeys)
@@ -241,11 +241,14 @@ public static class SongSorterCore
                             matchedInThisCategory = true;
 
                             var num = match.Index.ToString("000");
-                            var titleForFolder = string.IsNullOrWhiteSpace(candidate.Info.FolderTitle)
-                                ? Path.GetFileNameWithoutExtension(candidate.Path)
-                                : candidate.Info.FolderTitle;
+                            // 公式リストのタイトルを優先的に使用する
+                            var baseTitle = match.DisplayTitle;
+                            var subtitle = !string.IsNullOrWhiteSpace(candidate.Info.Subtitle) 
+                                ? candidate.Info.Subtitle 
+                                : match.DisplaySubtitle;
+
                             var dstGenreDir = Path.Combine(songsRoot, target.Dest);
-                            var folderNameCandidates = BuildFolderNameCandidates(num, titleForFolder, candidate.Info.Subtitle, candidate.Path);
+                            var folderNameCandidates = BuildFolderNameCandidates(num, baseTitle, subtitle, candidate.Path);
 
                             // 既存フォルダの確認（再実行時のべき等性のため）
                             if (TryFindExistingSongFolder(dstGenreDir, folderNameCandidates[0], out _))
@@ -274,7 +277,7 @@ public static class SongSorterCore
                             }
 
                             EnsureBoxDef(dstGenreDir, target.BoxTitle, target.BoxGenre, target.BoxExplanation);
-                            CopyDirectory(songDir, dstSongDir, candidate.Path);
+                            CopyDirectory(songDir, dstSongDir, candidate.Path, candidate.Info.Wave);
                             Interlocked.Increment(ref totalCopied);
                             copied = true;
                             reportTitle = candidate.Info.Title;
@@ -302,7 +305,7 @@ public static class SongSorterCore
                                             var m = versions[0];
                                             var num = m.Index.ToString("000");
                                             var dstGenreDir = Path.Combine(songsRoot, target.Dest);
-                                            var folderNameCandidates = BuildFolderNameCandidates(num, candidate.Info.FolderTitle ?? candidate.Info.Title, candidate.Info.Subtitle, candidate.Path);
+                                            var folderNameCandidates = BuildFolderNameCandidates(num, m.DisplayTitle, candidate.Info.Subtitle, candidate.Path);
                                             
                                             if (TryFindExistingSongFolder(dstGenreDir, folderNameCandidates[0], out _)) { skipped = true; continue; }
                                             
@@ -318,7 +321,7 @@ public static class SongSorterCore
                                             if (dstSongDir == null) { skipped = true; continue; }
 
                                             EnsureBoxDef(dstGenreDir, target.BoxTitle, target.BoxGenre, target.BoxExplanation);
-                                            CopyDirectory(songDir, dstSongDir, candidate.Path);
+                                            CopyDirectory(songDir, dstSongDir, candidate.Path, candidate.Info.Wave);
                                             Interlocked.Increment(ref totalCopied);
                                             copied = true;
                                             matchedCategory = target.Category;
@@ -374,15 +377,15 @@ public static class SongSorterCore
         return Path.Combine(selectedFolder, "Songs");
     }
 
-    private static Dictionary<string, Dictionary<string, List<(string SubtitleNorm, int Index)>>> LoadExportIndexes(string exportDir)
+    private static Dictionary<string, Dictionary<string, List<(string SubtitleNorm, int Index, string DisplayTitle, string DisplaySubtitle)>>> LoadExportIndexes(string exportDir)
     {
-        var result = new Dictionary<string, Dictionary<string, List<(string SubtitleNorm, int Index)>>>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, Dictionary<string, List<(string SubtitleNorm, int Index, string DisplayTitle, string DisplaySubtitle)>>>(StringComparer.OrdinalIgnoreCase);
         foreach (var cat in SongListBase.Categories)
         {
             var filePath = Path.Combine(exportDir, $"songlist_{cat.DisplayName}.txt");
             if (!File.Exists(filePath)) continue;
 
-            var songsByTitle = new Dictionary<string, List<(string SubtitleNorm, int Index)>>(StringComparer.Ordinal);
+            var songsByTitle = new Dictionary<string, List<(string SubtitleNorm, int Index, string DisplayTitle, string DisplaySubtitle)>>(StringComparer.Ordinal);
             foreach (var line in ReadAllLinesWithFallback(filePath))
             {
                 var parts = line.Split('\t');
@@ -398,7 +401,7 @@ public static class SongSorterCore
                 foreach (var key in NormalizationUtils.ExpandTitleMatchKeys(titleNorm))
                 {
                     if (!songsByTitle.TryGetValue(key, out var v)) { v = new(); songsByTitle[key] = v; }
-                    v.Add((subNorm, idx));
+                    v.Add((subNorm, idx, title, subtitle));
                 }
             }
             result[cat.FileName] = songsByTitle;
@@ -429,7 +432,7 @@ public static class SongSorterCore
     }
 
     private static string? FindLooseTitleMatchKey(
-        Dictionary<string, List<(string SubtitleNorm, int Index)>> songsByTitle,
+        Dictionary<string, List<(string SubtitleNorm, int Index, string DisplayTitle, string DisplaySubtitle)>> songsByTitle,
         IEnumerable<string> lookupKeys)
     {
         var hits = new HashSet<string>(StringComparer.Ordinal);
@@ -526,6 +529,14 @@ public static class SongSorterCore
 
     private static SongDetail? ReadSongInfo(string tjaPath)
     {
+        // (Ura)が付くファイルは除外
+        var fileName = Path.GetFileNameWithoutExtension(tjaPath);
+        if (fileName.Contains("(Ura)", StringComparison.OrdinalIgnoreCase) || 
+            fileName.Contains("（裏）", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
         // Retry logic for robustness
         for (int i = 0; i < 3; i++)
         {
@@ -539,7 +550,7 @@ public static class SongSorterCore
                     lines = File.ReadAllLines(tjaPath, Encoding.GetEncoding(932));
                 }
                 
-                string? title = null, titleJa = null, sub = null, subJa = null;
+                string? title = null, titleJa = null, sub = null, subJa = null, wave = null;
                 foreach (var l in lines)
                 {
                     var trim = l.Trim();
@@ -547,12 +558,21 @@ public static class SongSorterCore
                     else if (trim.StartsWith("TITLE:", StringComparison.OrdinalIgnoreCase)) title = trim["TITLE:".Length..].Trim();
                     else if (trim.StartsWith("SUBTITLEJA:", StringComparison.OrdinalIgnoreCase)) subJa = trim["SUBTITLEJA:".Length..].Trim();
                     else if (trim.StartsWith("SUBTITLE:", StringComparison.OrdinalIgnoreCase)) sub = trim["SUBTITLE:".Length..].Trim();
+                    else if (trim.StartsWith("WAVE:", StringComparison.OrdinalIgnoreCase)) wave = trim["WAVE:".Length..].Trim();
                 }
 
                 if (subJa != null && subJa.Contains("旧譜面")) return null;
 
                 var resT = titleJa ?? title;
                 if (resT == null) return null;
+
+                // タイトルに(Ura)が含まれる場合も除外
+                if (resT.Contains("(Ura)", StringComparison.OrdinalIgnoreCase) || 
+                    resT.Contains("（裏）", StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+
                 var resSub = subJa ?? sub ?? "";
 
                 if (TryExtractInlineSubtitleFromTitle(resT, out var mainTitle, out var inlineSubtitle))
@@ -564,7 +584,7 @@ public static class SongSorterCore
                     }
                 }
 
-                return new SongDetail(resT, resSub, titleJa ?? title ?? "", titleJa ?? resT);
+                return new SongDetail(resT, resSub, titleJa ?? title ?? "", titleJa ?? resT, wave);
             }
             catch (IOException) { Thread.Sleep(50); }
             catch { return null; }
@@ -650,24 +670,39 @@ public static class SongSorterCore
         }
     }
 
-    private static void CopyDirectory(string src, string dest, string? targetTjaPath = null)
+    private static void CopyDirectory(string src, string dest, string? targetTjaPath = null, string? targetWaveName = null)
     {
         Directory.CreateDirectory(dest);
         foreach (var file in Directory.GetFiles(src))
         {
             var name = Path.GetFileName(file);
-            // TJAファイルが複数ある場合は、マッチしたもの以外はコピーしない
-            if (targetTjaPath != null && name.EndsWith(".tja", StringComparison.OrdinalIgnoreCase))
+            var ext = Path.GetExtension(file).ToLowerInvariant();
+
+            // TJAファイルの処理
+            if (ext == ".tja")
             {
-                if (!string.Equals(file, targetTjaPath, StringComparison.OrdinalIgnoreCase))
+                if (targetTjaPath != null && !string.Equals(file, targetTjaPath, StringComparison.OrdinalIgnoreCase))
                     continue;
             }
+            // 音声ファイルの処理
+            else if (ext == ".ogg" || ext == ".wav" || ext == ".mp3")
+            {
+                if (!string.IsNullOrEmpty(targetWaveName))
+                {
+                    if (!string.Equals(name, targetWaveName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                }
+            }
+
             var dFile = Path.Combine(dest, name);
-            File.Copy(file, dFile, overwrite: false);
+            if (!File.Exists(dFile))
+            {
+                File.Copy(file, dFile, overwrite: false);
+            }
         }
         foreach (var d in Directory.GetDirectories(src))
         {
-            CopyDirectory(d, Path.Combine(dest, Path.GetFileName(d)), targetTjaPath);
+            CopyDirectory(d, Path.Combine(dest, Path.GetFileName(d)), targetTjaPath, targetWaveName);
         }
     }
 
@@ -683,11 +718,17 @@ public static class SongSorterCore
             if (seen.Add(cleaned)) candidates.Add(cleaned);
         }
 
-        Add($"{num} {baseTitle}");
-
         var subtitlePart = NormalizeSubtitleForFolderName(subtitle);
         if (!string.IsNullOrWhiteSpace(subtitlePart))
-            Add($"{num} {baseTitle} {subtitlePart}");
+        {
+            Add($"{num} {baseTitle} ({subtitlePart})");
+            Add($"{baseTitle} ({subtitlePart})");
+        }
+        else
+        {
+            Add($"{num} {baseTitle}");
+            Add($"{baseTitle}");
+        }
 
         var tjaName = Path.GetFileNameWithoutExtension(tjaPath);
         if (!string.IsNullOrWhiteSpace(tjaName))
