@@ -367,14 +367,7 @@ public static class SongSorterCore
 
     private static string ResolveSongsRoot(string selectedFolder)
     {
-        try
-        {
-            var name = new DirectoryInfo(selectedFolder).Name;
-            if (string.Equals(name, "Songs", StringComparison.OrdinalIgnoreCase))
-                return selectedFolder;
-        }
-        catch { }
-        return Path.Combine(selectedFolder, "Songs");
+        return selectedFolder;
     }
 
     private static Dictionary<string, Dictionary<string, List<(string SubtitleNorm, int Index, string DisplayTitle, string DisplaySubtitle)>>> LoadExportIndexes(string exportDir)

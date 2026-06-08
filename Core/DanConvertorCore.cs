@@ -9,7 +9,7 @@ public class DanConvertorCore
 {
     private static readonly string[] MusicExtensions = { ".ogg", ".mp3", ".wav", ".wma", ".xa" };
 
-    public static async Task ConvertAsync(string tjaPath, string outputRoot, string simuFolder, Action<string>? logAction = null, Dictionary<string, string>? assetMap = null, CancellationToken ct = default)
+    public static async Task ConvertAsync(string tjaPath, string outputRoot, string simuFolder, Action<string>? logAction = null, Dictionary<string, string>? assetMap = null, int? danIndexOverride = null, CancellationToken ct = default)
     {
         if (!File.Exists(tjaPath)) return;
 
@@ -33,7 +33,7 @@ public class DanConvertorCore
         string? courseTitle = globalMeta.GetValueOrDefault("TITLE") ?? tjaFileName;
         logAction?.Invoke($"分割優先変換を開始: {courseTitle} -> {outputDir}");
 
-        var danJson = new DanJson { title = courseTitle, danIndex = 19 };
+        var danJson = new DanJson { title = courseTitle, danIndex = danIndexOverride ?? 18 };
 
         // 外部から指定された画像アセットの処理
         if (assetMap != null)
@@ -125,6 +125,12 @@ public class DanConvertorCore
                 logAction?.Invoke($"  警告: 音源が見つかりませんでした (要確認): {section.Title}");
             }
 
+            var songConditions = new List<Condition>();
+            foreach (var examLine in section.ExamLines)
+            {
+                ParseExam(examLine, danJson.conditions, null); // danJson.conditions に直接追加
+            }
+
             string danPlateSource = Path.Combine(localDir, "Dan_Plate.png");
             if (File.Exists(danPlateSource))
             {
@@ -136,7 +142,13 @@ public class DanConvertorCore
                 }
             }
 
-            finalSongs.Add(new DanSong { path = targetTjaName, genre = section.Genre, difficulty = 3 });
+            finalSongs.Add(new DanSong 
+            { 
+                path = targetTjaName, 
+                genre = section.Genre, 
+                difficulty = 3,
+                conditions = null // 曲個別には保持しない
+            });
         }
 
         danJson.danSongs = finalSongs.ToArray();
@@ -241,8 +253,13 @@ public class DanConvertorCore
             }
             else if (current != null && inSongBlock)
             {
-                // EXAM行はスキップ（Contentに追加しない）
-                if (trimmed.StartsWith("EXAM", StringComparison.OrdinalIgnoreCase)) continue;
+                // EXAM行は収集するが、譜面データ（Content）には追加しない
+                if (trimmed.StartsWith("EXAM", StringComparison.OrdinalIgnoreCase))
+                {
+                    var match = Regex.Match(trimmed, @"^EXAM\d*:\s*(.*)$", RegexOptions.IgnoreCase);
+                    if (match.Success) current.ExamLines.Add(match.Groups[1].Value);
+                    continue;
+                }
                 
                 // 譜面開始前の空行もスキップ（#DELAY/#BALLOON検出のため）
                 if (string.IsNullOrWhiteSpace(trimmed) && current.Content.Count == 0) continue;
@@ -271,11 +288,40 @@ public class DanConvertorCore
         if (parts.Length < 3) return;
         string typeCode = parts[0].Trim().ToLower();
         if (!int.TryParse(parts[1], out int red) || !int.TryParse(parts[2], out int gold)) return;
-        if (typeCode == "g" && root != null) root.conditionGauge = new ConditionGauge { red = red, gold = gold };
+        
+        // グローバルなゲージ設定
+        if (typeCode == "g" && root != null)
+        {
+            root.conditionGauge = new ConditionGauge { red = red, gold = gold };
+            return;
+        }
+
+        string typeName = typeCode switch
+        {
+            "p" or "jp" => "Great",
+            "g" or "jg" => "Good",
+            "b" or "jb" or "m" => "Miss",
+            "s" => "Score",
+            "r" => "Roll",
+            "h" => "HitCount",
+            "c" => "Combo",
+            _ => "Other"
+        };
+
+        if (typeName == "Other") return;
+
+        var existingCond = targetList.FirstOrDefault(c => c.type == typeName);
+        if (existingCond != null)
+        {
+            existingCond.threshold.Add(new Threshold { red = red, gold = gold });
+        }
         else
         {
-            string typeName = typeCode switch { "jp" => "Great", "jg" => "Good", "jb" => "Miss", "s" => "Score", "r" => "Roll", "h" => "Hit", "c" => "Combo", _ => "Other" };
-            targetList.Add(new Condition { type = typeName, threshold = new List<Threshold> { new Threshold { red = red, gold = gold } } });
+            targetList.Add(new Condition 
+            { 
+                type = typeName, 
+                threshold = new List<Threshold> { new Threshold { red = red, gold = gold } } 
+            });
         }
     }
 
@@ -293,6 +339,7 @@ public class DanConvertorCore
         public string Course { get; set; } = "4";
         public string Balloon { get; set; } = "";
         public List<string> Content { get; set; } = new();
+        public List<string> ExamLines { get; set; } = new();
         public List<Condition> Conditions { get; set; } = new();
     }
 

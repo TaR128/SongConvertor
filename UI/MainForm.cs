@@ -51,7 +51,7 @@ public partial class MainForm : Form
 
         // Sync Source Folders
         txtAddSongsFolder.TextChanged += (s, e) => SyncSourceFolders(txtAddSongsFolder.Text);
-        txtTempSongs.TextChanged += (s, e) => SyncSourceFolders(txtTempSongs.Text);
+        // txtTempSongs の変更は AddSongs に反映させない（一方通行）
         
         // Sync Simu Folders
         txtTaikoRoot.Leave += (s, e) => SyncSimuFolders(txtTaikoRoot.Text);
@@ -108,7 +108,9 @@ public partial class MainForm : Form
     private void SyncSourceFolders(string value)
     {
         if (txtAddSongsFolder.Text != value) txtAddSongsFolder.Text = value;
-        if (txtTempSongs.Text != value) txtTempSongs.Text = value;
+        
+        string sorterSource = string.IsNullOrWhiteSpace(value) ? "" : Path.Combine(value, "Songs");
+        if (txtTempSongs.Text != sorterSource) txtTempSongs.Text = sorterSource;
     }
 
     private void SyncOutputSubFolders(string value)
@@ -678,7 +680,7 @@ public partial class MainForm : Form
             string outputDir = txtDanOutputFolder.Text.Trim();
 
             string filter = txtWikiFilter.Text.Trim();
-            await DanGeneratorCore.GenerateAsync(txtWikiUrl.Text, outputDir, txtDanSongsPath.Text, filter, Log, _plateAssignments, ct);
+            await DanGeneratorCore.GenerateAsync(txtWikiUrl.Text, outputDir, txtDanSongsPath.Text, filter, Log, _plateAssignments, null, ct);
             Log("段位生成が完了しました。");
             Log($"出力先: {outputDir}");
             MessageBox.Show("段位生成が完了しました。", "完了", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -747,12 +749,13 @@ public partial class MainForm : Form
 
             Log($"{tjaFiles.Count} 個のTJAファイルを処理します。");
 
+            int? danIndex = int.TryParse(txtDanConvertorIndex.Text, out int idx) ? idx : null;
             foreach (var tja in tjaFiles)
             {
                 ct.ThrowIfCancellationRequested();
                 Log($"処理開始: {Path.GetFileName(tja)}");
                 string simuFolder = string.IsNullOrWhiteSpace(txtDanConvertSimu.Text) ? "" : txtDanConvertSimu.Text;
-                await DanConvertorCore.ConvertAsync(tja, outputRoot, simuFolder, Log, _convertAssetAssignments, ct);
+                await DanConvertorCore.ConvertAsync(tja, outputRoot, simuFolder, Log, _convertAssetAssignments, danIndex, ct);
             }
 
             Log("すべての変換が完了しました。");
@@ -934,6 +937,8 @@ public partial class MainForm : Form
             DanConvertOutputFolder = txtDanConvertOutputFolder.Text,
             WikiFilter = "", // 記憶しない
             TjaFile = "", // 記憶しない
+            DanGeneratorIndex = "", // 記憶しない
+            DanConvertorIndex = txtDanConvertorIndex.Text,
             SelectedCategoriesCsv = string.Join("|", GetSelectedSourceCategories()),
             ConvertAssetsJson = JsonSerializer.Serialize(_convertAssetAssignments)
         };
@@ -965,6 +970,8 @@ public partial class MainForm : Form
 
             txtWikiUrl.Text = settings.WikiUrl ?? "";
             txtWikiFilter.Text = "";
+            txtDanGeneratorIndex.Text = "";
+            txtDanConvertorIndex.Text = settings.DanConvertorIndex ?? "";
 
             _selectedSourceCategories.Clear();
             var raw = settings.SelectedCategoriesCsv ?? string.Empty;
@@ -1019,6 +1026,8 @@ public partial class MainForm : Form
         public string DanConvertOutputFolder { get; set; } = "";
         public string WikiFilter { get; set; } = "";
         public string TjaFile { get; set; } = "";
+        public string DanGeneratorIndex { get; set; } = "";
+        public string DanConvertorIndex { get; set; } = "";
         public string SelectedCategoriesCsv { get; set; } = "";
         public string ConvertAssetsJson { get; set; } = "";
     }
