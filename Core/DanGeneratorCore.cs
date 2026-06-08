@@ -524,7 +524,10 @@ public class DanGeneratorCore
                 if (!string.IsNullOrEmpty(songsFolder) && Directory.Exists(songsFolder))
                 {
                     ct.ThrowIfCancellationRequested();
-                    var allDirs = Directory.GetDirectories(songsFolder, "*", SearchOption.AllDirectories);
+                    // 指定されたSongsフォルダ自体も含めて探索
+                    var allDirs = new List<string> { songsFolder };
+                    allDirs.AddRange(Directory.GetDirectories(songsFolder, "*", SearchOption.AllDirectories));
+                    
                     foreach (var s in dan.danSongs)
                     {
                         ct.ThrowIfCancellationRequested();
@@ -656,14 +659,23 @@ public class DanGeneratorCore
         return false;
     }
 
-    private static string? FindDirectoryFuzzy(string[] dirs, string targetName)
+    private static string? FindDirectoryFuzzy(IEnumerable<string> dirs, string targetName)
     {
         string normalizedTarget = NormalizationUtils.NormalizeTitle(targetName);
         if (string.IsNullOrEmpty(normalizedTarget)) return null;
-        var match = dirs.FirstOrDefault(d => NormalizationUtils.NormalizeTitle(Path.GetFileName(d)).EndsWith(normalizedTarget));
+        
+        // 1. 完全一致（正規化後）
+        var match = dirs.FirstOrDefault(d => NormalizationUtils.NormalizeTitle(Path.GetFileName(d)).Equals(normalizedTarget, StringComparison.OrdinalIgnoreCase));
         if (match != null) return match;
-        match = dirs.FirstOrDefault(d => NormalizationUtils.NormalizeTitle(Path.GetFileName(d)).Contains(normalizedTarget));
+
+        // 2. 後方一致（正規化後）
+        match = dirs.FirstOrDefault(d => NormalizationUtils.NormalizeTitle(Path.GetFileName(d)).EndsWith(normalizedTarget, StringComparison.OrdinalIgnoreCase));
         if (match != null) return match;
+
+        // 3. 部分一致（正規化後）
+        match = dirs.FirstOrDefault(d => NormalizationUtils.NormalizeTitle(Path.GetFileName(d)).Contains(normalizedTarget, StringComparison.OrdinalIgnoreCase));
+        if (match != null) return match;
+
         return null;
     }
 
