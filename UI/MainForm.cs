@@ -63,11 +63,12 @@ public partial class MainForm : Form
         };
         
         // Operations
-        btnFetchLists.Click += async (s, e) => await OnFetchListsClick();
         btnOrganize.Click += async (s, e) => await OnOrganizeClick();
         btnGenerateDan.Click += async (s, e) => await OnGenerateDanClick();
         btnExecuteAddSongs.Click += async (s, e) => await OnExecuteAddSongsClick();
         btnConvertDan.Click += async (s, e) => await OnConvertDanClick();
+
+        this.Shown += async (s, e) => await OnFetchListsClick(true);
 
         menuJapanese.Click += (s, e) => ChangeLanguage(Language.Japanese);
         menuEnglish.Click += (s, e) => ChangeLanguage(Language.English);
@@ -148,7 +149,6 @@ public partial class MainForm : Form
 
     private void SetActionButtonsEnabled(bool enabled)
     {
-        btnFetchLists.Enabled = enabled;
         btnOrganize.Enabled = enabled;
         btnGenerateDan.Enabled = enabled;
         btnExecuteAddSongs.Enabled = enabled;
@@ -161,11 +161,13 @@ public partial class MainForm : Form
         {
             Name = "btnCategorySelect",
             Text = LanguageManager.GetString("CategoryAll"),
-            Location = new Point(370, 170),
-            Size = new Size(280, 45),
+            Location = new Point(btnOrganize.Right + 10, btnOrganize.Top),
+            Size = btnOrganize.Size,
             BackColor = Color.FromArgb(80, 80, 80),
             ForeColor = Color.White,
-            FlatStyle = FlatStyle.Flat
+            FlatStyle = FlatStyle.Flat,
+            Font = btnOrganize.Font,
+            Anchor = AnchorStyles.Left | AnchorStyles.Top
         };
         _btnCategorySelect.Click += (s, e) =>
         {
@@ -536,12 +538,12 @@ public partial class MainForm : Form
             .ToArray();
     }
 
-    private async Task OnFetchListsClick()
+    private async Task OnFetchListsClick(bool isAutomatic = false)
     {
         var ct = BeginOperation();
         SetStatus(LanguageManager.GetString("FetchingList"), true);
         SetIndeterminateProgress(true);
-        Log(LanguageManager.GetString("StartFetchList"));
+        Log(isAutomatic ? "起動時の自動譜面リスト更新を開始します。" : LanguageManager.GetString("StartFetchList"));
 
         try
         {
@@ -562,12 +564,18 @@ public partial class MainForm : Form
             }
 
             Log(LanguageManager.GetString("FetchDone"));
-            MessageBox.Show(LanguageManager.GetString("FetchDone"), LanguageManager.GetString("Done"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!isAutomatic)
+            {
+                MessageBox.Show(LanguageManager.GetString("FetchDone"), LanguageManager.GetString("Done"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
         catch (OperationCanceledException)
         {
             Log(LanguageManager.GetString("UserCancelled"));
-            MessageBox.Show(LanguageManager.GetString("UserCancelled"), LanguageManager.GetString("Interrupt"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (!isAutomatic)
+            {
+                MessageBox.Show(LanguageManager.GetString("UserCancelled"), LanguageManager.GetString("Interrupt"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
         catch (Exception ex)
         {
@@ -965,7 +973,6 @@ public partial class MainForm : Form
         btnBrowseTemp.Text = LanguageManager.GetString("Browse");
         lblTaikoRoot.Text = LanguageManager.GetString("SelectDestSongs");
         btnBrowseRoot.Text = LanguageManager.GetString("Browse");
-        btnFetchLists.Text = LanguageManager.GetString("UpdateSongList");
         btnOrganize.Text = LanguageManager.GetString("StartSort");
         if (_btnCategorySelect != null) UpdateCategoryButtonText();
 

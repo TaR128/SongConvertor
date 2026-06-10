@@ -528,9 +528,13 @@ public class DanGeneratorCore
                     var allDirs = new List<string> { songsFolder };
                     allDirs.AddRange(Directory.GetDirectories(songsFolder, "*", SearchOption.AllDirectories));
                     
-                    foreach (var s in dan.danSongs)
+                    var songsToKeep = new List<DanSong>();
+                    var indicesToRemove = new List<int>();
+
+                    for (int sIdx = 0; sIdx < dan.danSongs.Count; sIdx++)
                     {
                         ct.ThrowIfCancellationRequested();
+                        var s = dan.danSongs[sIdx];
                         string songNameRaw = Path.GetFileNameWithoutExtension(s.path); 
                         string songNameForSearch = songNameRaw.Replace("(裏譜面)", "").Replace("(裏)", "").Trim();
                         string? foundDir = FindDirectoryFuzzy(allDirs, songNameForSearch);
@@ -542,8 +546,38 @@ public class DanGeneratorCore
                                 if (ext == ".tja") File.Copy(file, Path.Combine(rankFolder, s.path), true);
                                 else if (ext == ".ogg" || ext == ".mp3") File.Copy(file, Path.Combine(rankFolder, Path.GetFileName(file)), true);
                             }
+                            songsToKeep.Add(s);
                         }
-                        else { missingSongs.Add($"[{detectedRank}] {songNameRaw}"); }
+                        else 
+                        { 
+                            missingSongs.Add($"[{detectedRank}] {songNameRaw}");
+                            indicesToRemove.Add(sIdx);
+                        }
+                    }
+
+                    // 見つからなかった曲を danSongs から削除し、対応する conditions の threshold も削除
+                    if (indicesToRemove.Count > 0)
+                    {
+                        int originalSongCount = dan.danSongs.Count;
+                        dan.danSongs = songsToKeep;
+                        
+                        foreach (var cond in dan.conditions)
+                        {
+                            // 曲数と同じ数の閾値がある場合のみ、曲に対応する閾値を削除する
+                            // (1つしかない場合は、コース全体での条件とみなして削除しない)
+                            if (cond.threshold.Count == originalSongCount)
+                            {
+                                // 逆順で削除してインデックスのずれを防ぐ
+                                for (int rIdx = indicesToRemove.Count - 1; rIdx >= 0; rIdx--)
+                                {
+                                    int songIdx = indicesToRemove[rIdx];
+                                    if (songIdx < cond.threshold.Count)
+                                    {
+                                        cond.threshold.RemoveAt(songIdx);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 

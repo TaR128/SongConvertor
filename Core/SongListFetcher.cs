@@ -1,4 +1,4 @@
-using System.Collections.Immutable;
+﻿using System.Collections.Immutable;
 using System.Net.Http;
 using System.Text;
 using HtmlAgilityPack;
@@ -36,13 +36,24 @@ public static class SongListFetcher
     public static async Task<List<SongInfo>> FetchSongsAsync(string fileName, CancellationToken ct = default)
     {
         var url = SongListBase.BaseUrl + fileName;
-        using var response = await HttpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Add("Accept-Language", "ja-JP,ja;q=0.9");
+        using var response = await HttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
 
         var bytes = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-        var encoding = response.Content.Headers.ContentType?.CharSet != null
-            ? Encoding.GetEncoding(response.Content.Headers.ContentType.CharSet)
-            : Encoding.UTF8;
+        var encoding = Encoding.GetEncoding(932); // Shift-JIS for Japanese
+        try
+        {
+            if (response.Content.Headers.ContentType?.CharSet != null)
+            {
+                encoding = Encoding.GetEncoding(response.Content.Headers.ContentType.CharSet);
+            }
+        }
+        catch
+        {
+            // Fallback to Shift-JIS if encoding is invalid
+        }
         var html = encoding.GetString(bytes);
 
         return ExtractSongs(html);
@@ -124,3 +135,5 @@ public static class SongListFetcher
         return string.Join(" ", decoded.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
     }
 }
+
+
