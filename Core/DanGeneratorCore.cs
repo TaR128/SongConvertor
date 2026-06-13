@@ -13,6 +13,20 @@ public class DanGeneratorCore
 
     public static async Task<List<string>> FetchRankNamesAsync(string inputSource, CancellationToken ct = default)
     {
+        var groups = await FetchRankNamesByVersionAsync(inputSource, ct);
+        var allRanks = new List<string>();
+        foreach (var group in groups)
+        {
+            foreach (var rank in group.Ranks)
+            {
+                if (!allRanks.Contains(rank)) allRanks.Add(rank);
+            }
+        }
+        return allRanks;
+    }
+
+    public static async Task<List<VersionRankGroup>> FetchRankNamesByVersionAsync(string inputSource, CancellationToken ct = default)
+    {
         string html;
         if (inputSource.StartsWith("http"))
         {
@@ -22,19 +36,20 @@ public class DanGeneratorCore
         }
         else
         {
-            if (!File.Exists(inputSource)) return new List<string>();
+            if (!File.Exists(inputSource)) return new List<VersionRankGroup>();
             html = await File.ReadAllTextAsync(inputSource, ct);
         }
 
         var doc = new HtmlDoc();
         doc.LoadHtml(html);
         var nodes = doc.DocumentNode.SelectNodes("//h3 | //h4 | //table");
-        if (nodes == null) return new List<string>();
+        if (nodes == null) return new List<VersionRankGroup>();
 
         var rankNames = new[] { "五級", "四級", "三級", "二級", "一級", "初段", "二段", "三段", "四段", "五段", "六段", "七段", "八段", "九段", "十段", "玄人", "名人", "超人", "達人" };
-        var excludeKeywords = new[] { "合格条件", "お題", "お品書き", "魂ゲージ", "たたけた数", "叩けた数", "総音符数", "ノーツ数", "不可", "連打数", "良", "可", "コンボ", "最大コンボ数", "スコア", "動画", "計", "楽曲名", "課題曲", "難易度", "難しさ", "むずかしさ", "強さ", "★", "レベル", "概要", "詳細", "備考", "リンク", "プレイ動画", "参照", "初出", "回数", "解放期間", "解放条件", "QRコード", "QR", "公式サイト", "コメント", "アンケート", "疑問", "解決所", "募集", "募集中", "？", "質問" };
+        var excludeKeywords = new[] { "合格条件", "お題", "お品書き", "魂ゲージ", "たたけた数", "叩けた数", "総音符数", "ノーツ数", "不可", "連打数", "良", "可", "コンボ", "最大コンボ数", "スコア", "動画", "計", "楽曲名", "課題曲", "難易度", "難しさ", "むずかしさ", "強さ", "★", "レベル", "概要", "詳細", "備考", "リンク", "プレイ動画", "参照", "初出", "回数", "解放期間", "解放条件", "QRコード", "QR", "公式サイト", "コメント", "アンケート", "疑問", "解決所", "募集", "募集中", "？", "質問", "お願い" };
 
-        var detectedRanks = new List<string>();
+        var result = new List<VersionRankGroup>();
+        var currentGroup = new VersionRankGroup { VersionName = "その他" };
         string currentVersion = "";
         string currentSection = "";
         bool isGaiden = inputSource.Contains("外伝") || inputSource.Contains("%E5%A4%96%E4%BC%9D");
@@ -44,6 +59,16 @@ public class DanGeneratorCore
             if (node.Name == "h3")
             {
                 currentVersion = HtmlEntity.DeEntitize(node.InnerText.Trim());
+                // 無関係なバージョン名はスキップ
+                if (excludeKeywords.Any(k => currentVersion.Contains(k)))
+                {
+                    continue;
+                }
+                if (!isGaiden && !string.IsNullOrEmpty(currentVersion))
+                {
+                    if (currentGroup.Ranks.Count > 0) result.Add(currentGroup);
+                    currentGroup = new VersionRankGroup { VersionName = currentVersion };
+                }
                 continue;
             }
             if (node.Name == "h4")
@@ -98,14 +123,21 @@ public class DanGeneratorCore
                 {
                     rank = rank.Replace("(裏)", "").Replace("(おに)", "").Replace("(おに裏)", "").Trim();
                     rank = Regex.Replace(rank, @"^[（(]裏[）)]$","").Trim();
-                    if (!detectedRanks.Contains(rank)) detectedRanks.Add(rank);
+                    if (!currentGroup.Ranks.Contains(rank)) currentGroup.Ranks.Add(rank);
                 }
             }
         }
-        return detectedRanks;
+        if (currentGroup.Ranks.Count > 0) result.Add(currentGroup);
+        return result;
     }
 
-    public static async Task GenerateAsync(string inputSource, string outputDir, string songsFolder = "", string filter = "", Action<string>? logAction = null, Dictionary<string, string>? plateMap = null, int? danIndexOverride = null, CancellationToken ct = default)
+    public class VersionRankGroup
+    {
+        public string VersionName { get; set; } = "";
+        public List<string> Ranks { get; set; } = new List<string>();
+    }
+
+    public static async Task GenerateAsync(string inputSource, string outputDir, string songsFolder = "", string filter = "", Action<string>? logAction = null, Dictionary<string, string>? plateMap = null, Dictionary<string, string>? otherImageMap = null, int? danIndexOverride = null, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
         if (!Directory.Exists(outputDir)) Directory.CreateDirectory(outputDir);
@@ -152,7 +184,7 @@ public class DanGeneratorCore
 
         var rankNames = new[] { "五級", "四級", "三級", "二級", "一級", "初段", "二段", "三段", "四段", "五段", "六段", "七段", "八段", "九段", "十段", "玄人", "名人", "超人", "達人" };
         
-        var excludeKeywords = new[] { "合格条件", "お題", "お品書き", "魂ゲージ", "たたけた数", "叩けた数", "総音符数", "ノーツ数", "不可", "連打数", "良", "可", "コンボ", "最大コンボ数", "スコア", "動画", "計", "楽曲名", "課題曲", "難易度", "難しさ", "むずかしさ", "強さ", "★", "レベル", "概要", "詳細", "備考", "リンク", "プレイ動画", "参照", "初出", "回数", "解放期間", "解放条件", "QRコード", "QR", "公式サイト", "コメント", "アンケート", "疑問", "解決所", "募集", "募集中", "？", "質問" };
+        var excludeKeywords = new[] { "合格条件", "お題", "お品書き", "魂ゲージ", "たたけた数", "叩けた数", "総音符数", "ノーツ数", "不可", "連打数", "良", "可", "コンボ", "最大コンボ数", "スコア", "動画", "計", "楽曲名", "課題曲", "難易度", "難しさ", "むずかしさ", "強さ", "★", "レベル", "概要", "詳細", "備考", "リンク", "プレイ動画", "参照", "初出", "回数", "解放期間", "解放条件", "QRコード", "QR", "公式サイト", "コメント", "アンケート", "疑問", "解決所", "募集", "募集中", "？", "質問", "お願い" };
 
         int totalProcessed = 0;
         var missingSongs = new List<string>();
@@ -518,6 +550,38 @@ public class DanGeneratorCore
                     {
                         File.Copy(danPlateSource, Path.Combine(rankFolder, "Plate.png"), true);
                         dan.danPlatePath = "Plate.png";
+                    }
+                }
+
+                // Plate以外の画像のコピー処理
+                if (otherImageMap != null)
+                {
+                    var otherImageMappings = new Dictionary<string, string>
+                    {
+                        { "danPanelSidePath", "PanelSide.png" },
+                        { "danTitlePlatePath", "TitlePlate.png" },
+                        { "danMiniPlatePath", "MiniPlate.png" }
+                    };
+
+                    foreach (var mapping in otherImageMappings)
+                    {
+                        if (otherImageMap.TryGetValue(mapping.Key, out var imagePath) && File.Exists(imagePath))
+                        {
+                            File.Copy(imagePath, Path.Combine(rankFolder, mapping.Value), true);
+                            // DanCourseクラスにこれらのプロパティがある場合は設定
+                            switch (mapping.Key)
+                            {
+                                case "danPanelSidePath":
+                                    dan.danPanelSidePath = mapping.Value;
+                                    break;
+                                case "danTitlePlatePath":
+                                    dan.danTitlePlatePath = mapping.Value;
+                                    break;
+                                case "danMiniPlatePath":
+                                    dan.danMiniPlatePath = mapping.Value;
+                                    break;
+                            }
+                        }
                     }
                 }
 

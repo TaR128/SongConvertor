@@ -6,6 +6,12 @@ public class DanCourse
     public int danIndex { get; set; }
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public string? danPlatePath { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? danPanelSidePath { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? danTitlePlatePath { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? danMiniPlatePath { get; set; }
     public List<DanSong> danSongs { get; set; } = new();
     public ConditionGauge conditionGauge { get; set; } = new();
     public List<Condition> conditions { get; set; } = new();

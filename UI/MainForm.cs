@@ -23,9 +23,10 @@ public partial class MainForm : Form
 
     private readonly HashSet<string> _selectedSourceCategories = new(SongSorterCore.SourceCategories, StringComparer.OrdinalIgnoreCase);
     private Button? _btnCategorySelect;
-    private Button? _btnPlateSelect;
+    private Button? _btnImageSelect;
     private Button? _btnConvertAssetSelect;
     private readonly Dictionary<string, string> _plateAssignments = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, string> _otherImageAssignments = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, string> _convertAssetAssignments = new(StringComparer.OrdinalIgnoreCase);
     private ToolStripStatusLabel? _cancelStatusLink;
     private CancellationTokenSource? _operationCts;
@@ -185,10 +186,10 @@ public partial class MainForm : Form
 
     private void InitializePlateSelectorUi()
     {
-        _btnPlateSelect = new Button
+        _btnImageSelect = new Button
         {
-            Name = "btnPlateSelect",
-            Text = LanguageManager.GetString("PlateSettings"),
+            Name = "btnImageSelect",
+            Text = "画像選択",
             Size = btnGenerateDan.Size,
             Location = new Point(btnGenerateDan.Right + 10, btnGenerateDan.Top),
             BackColor = Color.FromArgb(80, 80, 80),
@@ -196,11 +197,11 @@ public partial class MainForm : Form
             FlatStyle = FlatStyle.Flat,
             Font = btnGenerateDan.Font
         };
-        _btnPlateSelect.Click += async (s, e) => await ShowPlateSelectionDialog();
-        tabDanGenerator.Controls.Add(_btnPlateSelect);
+        _btnImageSelect.Click += async (s, e) => await ShowImageSelectionDialog();
+        tabDanGenerator.Controls.Add(_btnImageSelect);
     }
 
-    private async Task ShowPlateSelectionDialog()
+    private async Task ShowImageSelectionDialog()
     {
         if (string.IsNullOrWhiteSpace(txtWikiUrl.Text))
         {
@@ -212,8 +213,8 @@ public partial class MainForm : Form
         SetActionButtonsEnabled(false);
         try
         {
-            var ranks = await DanGeneratorCore.FetchRankNamesAsync(txtWikiUrl.Text);
-            if (ranks.Count == 0)
+            var rankGroups = await DanGeneratorCore.FetchRankNamesByVersionAsync(txtWikiUrl.Text);
+            if (rankGroups.Count == 0)
             {
                 MessageBox.Show(LanguageManager.GetString("DanNameNotFound"), LanguageManager.GetString("Warn"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
@@ -221,48 +222,287 @@ public partial class MainForm : Form
 
             using var dialog = new Form
             {
-                Text = LanguageManager.GetString("PlateIndividualSettings"),
+                Text = "画像設定",
                 StartPosition = FormStartPosition.CenterParent,
-                ClientSize = new Size(600, 500),
+                ClientSize = new Size(800, 650),
                 FormBorderStyle = FormBorderStyle.Sizable,
                 MinimizeBox = false
             };
 
-            var panel = new FlowLayoutPanel
+            var treeView = new TreeView
+            {
+                Dock = DockStyle.Fill,
+                ShowLines = true,
+                ShowPlusMinus = true,
+                ShowRootLines = true,
+                Font = new Font("Noto Sans", 9F),
+                BackColor = Color.FromArgb(40, 40, 40),
+                ForeColor = Color.White
+            };
+
+            // 共通画像設定ノード
+            var commonNode = new TreeNode("共通画像設定") { Tag = "common" };
+            treeView.Nodes.Add(commonNode);
+
+            // 全体設定ノード
+            var allSettingsNode = new TreeNode("全体設定") { Tag = "all" };
+            treeView.Nodes.Add(allSettingsNode);
+
+            // 全ての段位を全体設定の下に直接追加（重複排除して正しい順番でソート）
+            var rankNames = new[] { "達人", "超人", "名人", "玄人", "十段", "九段", "八段", "七段", "六段", "五段", "四段", "三段", "二段", "初段", "一級", "二級", "三級", "四級", "五級" };
+            var allRanks = new HashSet<string>();
+            foreach (var group in rankGroups)
+            {
+                foreach (var rank in group.Ranks)
+                {
+                    allRanks.Add(rank);
+                }
+            }
+            // rankNames の順番に従ってソート
+            var sortedRanks = allRanks.OrderBy(r => 
+            {
+                var index = Array.FindIndex(rankNames, rn => r.Contains(rn));
+                return index >= 0 ? index : int.MaxValue;
+            }).ThenBy(r => r);
+            foreach (var rank in sortedRanks)
+            {
+                var rankNode = new TreeNode(rank) { Tag = new ImageNodeData { Type = "plate", RankKey = rank, DisplayName = rank } };
+                allSettingsNode.Nodes.Add(rankNode);
+            }
+
+            // 詳細パネル
+            var detailPanel = new Panel
+            {
+                Dock = DockStyle.Right,
+                Width = 400,
+                BackColor = Color.FromArgb(50, 50, 50)
+            };
+
+            var selectedLabel = new Label
+            {
+                Text = "項目を選択してください",
+                Dock = DockStyle.Top,
+                Padding = new Padding(15),
+                Font = new Font("Noto Sans", 10F, FontStyle.Bold),
+                ForeColor = Color.White
+            };
+            detailPanel.Controls.Add(selectedLabel);
+
+            // 画像一覧表示用のパネル（共通・段位両方で使用）
+            var imageListPanel = new FlowLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 AutoScroll = true,
-                Padding = new Padding(10)
+                Padding = new Padding(15),
+                Visible = false
+            };
+            detailPanel.Controls.Add(imageListPanel);
+
+            // 共通画像の一覧を作成するための情報
+            var commonAssetsList = new[]
+            {
+                ("danPlatePath", "Plate"),
+                ("danPanelSidePath", "PanelSide"),
+                ("danTitlePlatePath", "TitlePlate"),
+                ("danMiniPlatePath", "MiniPlate")
             };
 
-            // 全体設定用の行
-            panel.Controls.Add(CreatePlateRow("*", LanguageManager.GetString("ApplyToAllDan"), _plateAssignments.GetValueOrDefault("*")));
-            foreach (var rank in ranks)
-            {
-                panel.Controls.Add(CreatePlateRow(rank, rank, _plateAssignments.GetValueOrDefault(rank)));
-            }
+            // 現在選択されている段位（nullならnull、共通なら"common
+            string? selectedKey = null;
+            Dictionary<string, TextBox> textBoxes = new Dictionary<string, TextBox>();
 
-            var btnOk = new Button { Text = LanguageManager.GetString("Save"), Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK };
-            dialog.Controls.Add(panel);
+            // ツリー選択イベント
+            treeView.AfterSelect += (s, e) =>
+            {
+                // パネルをクリア
+                imageListPanel.Controls.Clear();
+                textBoxes.Clear();
+                selectedKey = null;
+
+                if (e.Node.Tag is string tag && tag == "common")
+                {
+                    // 共通画像設定ノードが選択された場合
+                    selectedLabel.Text = "共通画像設定";
+                    selectedKey = "common";
+
+                    // 共通画像の一覧を作成
+                    foreach (var (key, name) in commonAssetsList)
+                    {
+                        var row = new Panel { Width = 360, Height = 45 };
+                        
+                        var lbl = new Label 
+                        { 
+                            Text = name, 
+                            Location = new Point(0, 10), 
+                            Width = 100, 
+                            Font = new Font("Noto Sans", 9F),
+                            ForeColor = Color.White 
+                        };
+                        
+                        var txt = new TextBox 
+                        { 
+                            Text = key == "danPlatePath" 
+                                ? _plateAssignments.GetValueOrDefault("*") ?? "" 
+                                : _otherImageAssignments.GetValueOrDefault(key) ?? "", 
+                            Location = new Point(105, 7), 
+                            Width = 170,
+                            ReadOnly = true,
+                            BackColor = Color.FromArgb(60, 60, 60),
+                            ForeColor = Color.White
+                        };
+                        
+                        var btn = new Button 
+                        { 
+                            Text = "参照", 
+                            Location = new Point(280, 4), 
+                            Width = 70, 
+                            Height = 25,
+                            BackColor = Color.FromArgb(0, 122, 204),
+                            ForeColor = Color.White,
+                            FlatStyle = FlatStyle.Flat
+                        };
+                        
+                        var keyCapture = key;
+                        btn.Click += (s, e) =>
+                        {
+                            using var ofd = new OpenFileDialog
+                            {
+                                Filter = "画像ファイル (*.png;*.jpg;*.jpeg)|*.png;*.jpg;*.jpeg|すべてのファイル (*.*)|*.*",
+                                Title = "画像を選択"
+                            };
+                            if (ofd.ShowDialog(dialog) == DialogResult.OK)
+                            {
+                                txt.Text = ofd.FileName;
+                                if (keyCapture == "danPlatePath")
+                                {
+                                    _plateAssignments["*"] = ofd.FileName;
+                                }
+                                else
+                                {
+                                    _otherImageAssignments[keyCapture] = ofd.FileName;
+                                }
+                            }
+                        };
+                        
+                        row.Controls.Add(lbl);
+                        row.Controls.Add(txt);
+                        row.Controls.Add(btn);
+                        imageListPanel.Controls.Add(row);
+                        textBoxes[key] = txt;
+                    }
+
+                    imageListPanel.Visible = true;
+                    imageListPanel.BringToFront();
+                }
+                else if (e.Node.Tag is ImageNodeData data && data.Type == "plate")
+                {
+                    // 段位ノードが選択された場合
+                    selectedLabel.Text = data.DisplayName;
+                    selectedKey = data.RankKey;
+
+                    // 段位用の一覧を作成（Plate + 共通画像）
+                    var rankAssets = new[]
+                    {
+                        ("plate", "Plate"),
+                        ("danPanelSidePath", "PanelSide"),
+                        ("danTitlePlatePath", "TitlePlate"),
+                        ("danMiniPlatePath", "MiniPlate")
+                    };
+
+                    foreach (var (key, name) in rankAssets)
+                    {
+                        var row = new Panel { Width = 360, Height = 45 };
+                        
+                        var lbl = new Label 
+                        { 
+                            Text = name, 
+                            Location = new Point(0, 10), 
+                            Width = 100, 
+                            Font = new Font("Noto Sans", 9F),
+                            ForeColor = Color.White 
+                        };
+                        
+                        var txt = new TextBox 
+                        { 
+                            Text = key == "plate" 
+                                ? _plateAssignments.GetValueOrDefault(data.RankKey) ?? "" 
+                                : _otherImageAssignments.GetValueOrDefault(key) ?? "", 
+                            Location = new Point(105, 7), 
+                            Width = 170,
+                            ReadOnly = true,
+                            BackColor = Color.FromArgb(60, 60, 60),
+                            ForeColor = Color.White
+                        };
+                        
+                        var btn = new Button 
+                        { 
+                            Text = "参照", 
+                            Location = new Point(280, 4), 
+                            Width = 70, 
+                            Height = 25,
+                            BackColor = Color.FromArgb(0, 122, 204),
+                            ForeColor = Color.White,
+                            FlatStyle = FlatStyle.Flat
+                        };
+                        
+                        var keyCapture = key;
+                        var rankKeyCapture = data.RankKey;
+                        btn.Click += (s, e) =>
+                        {
+                            using var ofd = new OpenFileDialog
+                            {
+                                Filter = "画像ファイル (*.png;*.jpg;*.jpeg)|*.png;*.jpg;*.jpeg|すべてのファイル (*.*)|*.*",
+                                Title = "画像を選択"
+                            };
+                            if (ofd.ShowDialog(dialog) == DialogResult.OK)
+                            {
+                                txt.Text = ofd.FileName;
+                                if (keyCapture == "plate")
+                                {
+                                    _plateAssignments[rankKeyCapture] = ofd.FileName;
+                                }
+                                else
+                                {
+                                    _otherImageAssignments[keyCapture] = ofd.FileName;
+                                }
+                            }
+                        };
+                        
+                        row.Controls.Add(lbl);
+                        row.Controls.Add(txt);
+                        row.Controls.Add(btn);
+                        imageListPanel.Controls.Add(row);
+                        textBoxes[key] = txt;
+                    }
+
+                    imageListPanel.Visible = true;
+                    imageListPanel.BringToFront();
+                }
+                else
+                {
+                    // その他（バージョンノードなど）
+                    selectedLabel.Text = "項目を選択してください";
+                    imageListPanel.Visible = false;
+                }
+            };
+
+            // 全ノード展開
+            treeView.ExpandAll();
+
+            // レイアウト
+            var btnOk = new Button { Text = "保存", Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK };
+            btnOk.Font = new Font("Noto Sans", 10F, FontStyle.Bold);
+            btnOk.BackColor = Color.FromArgb(0, 153, 255);
+            btnOk.ForeColor = Color.White;
+            btnOk.FlatStyle = FlatStyle.Flat;
+
+            dialog.Controls.Add(treeView);
+            dialog.Controls.Add(detailPanel);
             dialog.Controls.Add(btnOk);
 
             if (dialog.ShowDialog(this) == DialogResult.OK)
             {
-                foreach (Control control in panel.Controls)
-                {
-                    if (control is Panel row && row.Tag is string rName)
-                    {
-                        var txt = row.Controls.OfType<TextBox>().FirstOrDefault();
-                        if (txt != null && !string.IsNullOrWhiteSpace(txt.Text))
-                        {
-                            _plateAssignments[rName] = txt.Text;
-                        }
-                        else
-                        {
-                            _plateAssignments.Remove(rName);
-                        }
-                    }
-                }
+                SaveSettings();
             }
         }
         catch (Exception ex)
@@ -276,24 +516,15 @@ public partial class MainForm : Form
         }
     }
 
-    private Panel CreatePlateRow(string rankKey, string displayName, string? currentPath)
+    private class ImageNodeData
     {
-        var row = new Panel { Width = 550, Height = 35, Tag = rankKey };
-        var lbl = new Label { Text = displayName, Location = new Point(0, 5), Width = 180 };
-        var txt = new TextBox { Text = currentPath ?? "", Location = new Point(185, 2), Width = 280 };
-        var btn = new Button { Text = LanguageManager.GetString("Browse"), Location = new Point(470, 0), Width = 70 };
-
-        btn.Click += (s, e) =>
-        {
-            using var ofd = new OpenFileDialog { Filter = "Image files (*.png;*.jpg;*.jpeg)|*.png;*.jpg;*.jpeg|All files (*.*)|*.*" };
-            if (ofd.ShowDialog() == DialogResult.OK) txt.Text = ofd.FileName;
-        };
-
-        row.Controls.Add(lbl);
-        row.Controls.Add(txt);
-        row.Controls.Add(btn);
-        return row;
+        public string Type { get; set; } = ""; // "common" または "plate"
+        public string Key { get; set; } = ""; // common の場合のキー
+        public string RankKey { get; set; } = ""; // plate の場合のキー
+        public string DisplayName { get; set; } = "";
     }
+
+
 
     private void InitializeConvertAssetSelectorUi()
     {
@@ -318,59 +549,152 @@ public partial class MainForm : Form
         {
             Text = LanguageManager.GetString("ImageSettingsConv"),
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(580, 240),
-            FormBorderStyle = FormBorderStyle.FixedDialog,
-            MaximizeBox = false,
+            ClientSize = new Size(800, 650),
+            FormBorderStyle = FormBorderStyle.Sizable,
             MinimizeBox = false
         };
 
-        var panel = new FlowLayoutPanel
+        var treeView = new TreeView
         {
             Dock = DockStyle.Fill,
-            Padding = new Padding(10)
+            ShowLines = true,
+            ShowPlusMinus = true,
+            ShowRootLines = true,
+            Font = new Font("Noto Sans", 9F),
+            BackColor = Color.FromArgb(40, 40, 40),
+            ForeColor = Color.White
         };
 
-        var assets = new[] 
-        { 
+        // 全体設定ノード
+        var allSettingsNode = new TreeNode("全体設定") { Tag = "common" };
+        treeView.Nodes.Add(allSettingsNode);
+
+        // 詳細パネル
+        var detailPanel = new Panel
+        {
+            Dock = DockStyle.Right,
+            Width = 400,
+            BackColor = Color.FromArgb(50, 50, 50)
+        };
+
+        var selectedLabel = new Label
+        {
+            Text = "項目を選択してください",
+            Dock = DockStyle.Top,
+            Padding = new Padding(15),
+            Font = new Font("Noto Sans", 10F, FontStyle.Bold),
+            ForeColor = Color.White
+        };
+        detailPanel.Controls.Add(selectedLabel);
+
+        // 画像一覧表示用のパネル
+        var imageListPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            Padding = new Padding(15),
+            Visible = false
+        };
+        detailPanel.Controls.Add(imageListPanel);
+
+        // 共通画像の一覧を作成するための情報
+        var assets = new[]
+        {
             ("danPlatePath", "Plate"),
             ("danPanelSidePath", "PanelSide"),
             ("danTitlePlatePath", "TitlePlate"),
             ("danMiniPlatePath", "MiniPlate")
         };
 
-        var textboxes = new Dictionary<string, TextBox>();
-
-        foreach (var (key, label) in assets)
+        // ツリー選択イベント
+        treeView.AfterSelect += (s, e) =>
         {
-            var row = new Panel { Width = 550, Height = 35 };
-            var lbl = new Label { Text = label, Location = new Point(0, 5), Width = 180 };
-            var txt = new TextBox { Text = _convertAssetAssignments.GetValueOrDefault(key) ?? "", Location = new Point(185, 2), Width = 280 };
-            var btn = new Button { Text = LanguageManager.GetString("Browse"), Location = new Point(470, 0), Width = 70 };
+            // パネルをクリア
+            imageListPanel.Controls.Clear();
+            selectedLabel.Text = "項目を選択してください";
+            imageListPanel.Visible = false;
 
-            btn.Click += (s, e) =>
+            if (e.Node.Tag is string tag && tag == "common")
             {
-                using var ofd = new OpenFileDialog { Filter = "Image files (*.png;*.jpg;*.jpeg)|*.png;*.jpg;*.jpeg|All files (*.*)|*.*" };
-                if (ofd.ShowDialog() == DialogResult.OK) txt.Text = ofd.FileName;
-            };
+                // 全体設定ノードが選択された場合
+                selectedLabel.Text = "全体設定";
+                imageListPanel.Visible = true;
+                imageListPanel.BringToFront();
 
-            row.Controls.Add(lbl);
-            row.Controls.Add(txt);
-            row.Controls.Add(btn);
-            panel.Controls.Add(row);
-            textboxes[key] = txt;
-        }
+                // 画像の一覧を作成
+                foreach (var (key, name) in assets)
+                {
+                    var row = new Panel { Width = 360, Height = 45 };
 
-        var btnOk = new Button { Text = LanguageManager.GetString("Save"), Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK };
-        dialog.Controls.Add(panel);
+                    var lbl = new Label
+                    {
+                        Text = name,
+                        Location = new Point(0, 10),
+                        Width = 100,
+                        Font = new Font("Noto Sans", 9F),
+                        ForeColor = Color.White
+                    };
+
+                    var txt = new TextBox
+                    {
+                        Text = _convertAssetAssignments.GetValueOrDefault(key) ?? "",
+                        Location = new Point(105, 7),
+                        Width = 170,
+                        ReadOnly = true,
+                        BackColor = Color.FromArgb(60, 60, 60),
+                        ForeColor = Color.White
+                    };
+
+                    var btn = new Button
+                    {
+                        Text = "参照",
+                        Location = new Point(280, 4),
+                        Width = 70,
+                        Height = 25,
+                        BackColor = Color.FromArgb(0, 122, 204),
+                        ForeColor = Color.White,
+                        FlatStyle = FlatStyle.Flat
+                    };
+
+                    var keyCapture = key;
+                    btn.Click += (s, e) =>
+                    {
+                        using var ofd = new OpenFileDialog
+                        {
+                            Filter = "画像ファイル (*.png;*.jpg;*.jpeg)|*.png;*.jpg;*.jpeg|すべてのファイル (*.*)|*.*",
+                            Title = "画像を選択"
+                        };
+                        if (ofd.ShowDialog(dialog) == DialogResult.OK)
+                        {
+                            txt.Text = ofd.FileName;
+                            _convertAssetAssignments[keyCapture] = ofd.FileName;
+                        }
+                    };
+
+                    row.Controls.Add(lbl);
+                    row.Controls.Add(txt);
+                    row.Controls.Add(btn);
+                    imageListPanel.Controls.Add(row);
+                }
+            }
+        };
+
+        // 全ノード展開
+        treeView.ExpandAll();
+
+        // レイアウト
+        var btnOk = new Button { Text = "保存", Dock = DockStyle.Bottom, Height = 40, DialogResult = DialogResult.OK };
+        btnOk.Font = new Font("Noto Sans", 10F, FontStyle.Bold);
+        btnOk.BackColor = Color.FromArgb(0, 153, 255);
+        btnOk.ForeColor = Color.White;
+        btnOk.FlatStyle = FlatStyle.Flat;
+
+        dialog.Controls.Add(treeView);
+        dialog.Controls.Add(detailPanel);
         dialog.Controls.Add(btnOk);
 
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
-            foreach (var kvp in textboxes)
-            {
-                if (!string.IsNullOrWhiteSpace(kvp.Value.Text)) _convertAssetAssignments[kvp.Key] = kvp.Value.Text;
-                else _convertAssetAssignments.Remove(kvp.Key);
-            }
             SaveSettings();
         }
     }
@@ -667,6 +991,7 @@ public partial class MainForm : Form
                 txtWikiFilter.Text,
                 Log,
                 _plateAssignments,
+                _otherImageAssignments,
                 danIndex,
                 ct);
 
@@ -858,14 +1183,96 @@ public partial class MainForm : Form
 #endif
     }
 
-    private Task RunGitCloneAsync(string workingDir, CancellationToken ct)
+    private async Task RunGitCloneAsync(string workingDir, CancellationToken ct)
     {
-        return RunGitCommandAsync(workingDir, "clone --progress https://ese.tjadataba.se/ESE/ESE.git Songs", ct);
+        // 浅いクローン (depth=1) で帯域を節約し、かつ --no-tags でタグを取得しない
+        const int maxRetries = 3;
+        int attempt = 0;
+
+        while (true)
+        {
+            try
+            {
+                attempt++;
+                Log($"クローン試行 {attempt}/{maxRetries}...");
+                
+                await RunGitCommandAsync(
+                    workingDir, 
+                    "clone --progress --depth=1 --no-tags https://ese.tjadataba.se/ESE/ESE.git Songs", 
+                    ct);
+                
+                Log("クローン成功！");
+                break;
+            }
+            catch (Exception ex)
+            {
+                if (attempt >= maxRetries)
+                {
+                    Log($"最大リトライ回数 {maxRetries} に達しました。");
+                    throw;
+                }
+                
+                Log($"クローン失敗: {ex.Message}");
+                Log($"5秒後に再試行します...");
+                
+                // 失敗した場合は不完全なディレクトリを削除
+                var songsDir = Path.Combine(workingDir, "Songs");
+                if (Directory.Exists(songsDir))
+                {
+                    try
+                    {
+                        Directory.Delete(songsDir, true);
+                        Log("不完全なディレクトリを削除しました。");
+                    }
+                    catch (Exception deleteEx)
+                    {
+                        Log($"ディレクトリ削除失敗: {deleteEx.Message}");
+                    }
+                }
+                
+                await Task.Delay(5000, ct);
+            }
+        }
     }
 
-    private Task RunGitPullAsync(string workingDir, CancellationToken ct)
+    private async Task RunGitPullAsync(string workingDir, CancellationToken ct)
     {
-        return RunGitCommandAsync(workingDir, "-C Songs pull --progress --ff-only", ct);
+        const int maxRetries = 3;
+        int attempt = 0;
+
+        while (true)
+        {
+            try
+            {
+                attempt++;
+                Log($"プル試行 {attempt}/{maxRetries}...");
+                
+                await RunGitCommandAsync(
+                    workingDir, 
+                    "-C Songs fetch --depth=1", 
+                    ct);
+                
+                await RunGitCommandAsync(
+                    workingDir, 
+                    "-C Songs reset --hard origin/HEAD", 
+                    ct);
+                
+                Log("プル成功！");
+                break;
+            }
+            catch (Exception ex)
+            {
+                if (attempt >= maxRetries)
+                {
+                    Log($"最大リトライ回数 {maxRetries} に達しました。");
+                    throw;
+                }
+                
+                Log($"プル失敗: {ex.Message}");
+                Log($"5秒後に再試行します...");
+                await Task.Delay(5000, ct);
+            }
+        }
     }
 
     private async Task RunGitCommandAsync(string workingDir, string arguments, CancellationToken ct)
@@ -883,6 +1290,10 @@ public partial class MainForm : Form
         
         // パスワード入力を促してハングするのを防ぐ
         process.StartInfo.EnvironmentVariables["GIT_TERMINAL_PROMPT"] = "0";
+        // ネットワーク安定化のためのタイムアウト設定
+        process.StartInfo.EnvironmentVariables["GIT_HTTP_LOW_SPEED_LIMIT"] = "1000";
+        process.StartInfo.EnvironmentVariables["GIT_HTTP_LOW_SPEED_TIME"] = "30";
+        process.StartInfo.EnvironmentVariables["GIT_SSL_NO_VERIFY"] = "0"; // SSL検証は有効のまま
 
         process.OutputDataReceived += (s, e) =>
         {
@@ -934,6 +1345,8 @@ public partial class MainForm : Form
             DanMiniPlateText = txtDanMiniPlateText.Text,
             SelectedCategoriesCsv = string.Join("|", GetSelectedSourceCategories()),
             ConvertAssetsJson = JsonSerializer.Serialize(_convertAssetAssignments),
+            PlateAssignments = _plateAssignments,
+            OtherImagesJson = JsonSerializer.Serialize(_otherImageAssignments),
             Language = LanguageManager.CurrentLanguage.ToString()
         };
 
@@ -988,7 +1401,7 @@ public partial class MainForm : Form
         lblDanSongsPath.Text = LanguageManager.GetString("SelectSongsFolder");
         btnBrowseDanSongs.Text = LanguageManager.GetString("Browse");
         btnGenerateDan.Text = LanguageManager.GetString("GenerateDan");
-        if (_btnPlateSelect != null) _btnPlateSelect.Text = LanguageManager.GetString("PlateSettings");
+        if (_btnImageSelect != null) _btnImageSelect.Text = "画像選択";
 
         // Dan Convertor
         lblTjaFile.Text = LanguageManager.GetString("TjaFile");
@@ -1068,6 +1481,22 @@ public partial class MainForm : Form
                     foreach (var kvp in assets) _convertAssetAssignments[kvp.Key] = kvp.Value;
                 }
             }
+
+            if (settings.PlateAssignments != null && settings.PlateAssignments.Count > 0)
+            {
+                _plateAssignments.Clear();
+                foreach (var kvp in settings.PlateAssignments) _plateAssignments[kvp.Key] = kvp.Value;
+            }
+
+            if (!string.IsNullOrEmpty(settings.OtherImagesJson))
+            {
+                var otherImages = JsonSerializer.Deserialize<Dictionary<string, string>>(settings.OtherImagesJson);
+                if (otherImages != null)
+                {
+                    _otherImageAssignments.Clear();
+                    foreach (var kvp in otherImages) _otherImageAssignments[kvp.Key] = kvp.Value;
+                }
+            }
         }
         catch { }
     }
@@ -1103,6 +1532,8 @@ public partial class MainForm : Form
         public string SelectedCategoriesCsv { get; set; } = "";
         public string ConvertAssetsJson { get; set; } = "";
         public string Language { get; set; } = "";
+        public Dictionary<string, string> PlateAssignments { get; set; } = new Dictionary<string, string>();
+        public string OtherImagesJson { get; set; } = "";
     }
 
     private async Task CheckForUpdateOnStartupAsync()
