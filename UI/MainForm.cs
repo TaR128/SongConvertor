@@ -388,6 +388,7 @@ public partial class MainForm : Form
                         };
                         
                         var keyCapture = key;
+                        var sortedRanksCapture = sortedRanks.ToList();
                         btnBrowse.Click += (s, e) =>
                         {
                             using var ofd = new OpenFileDialog
@@ -398,6 +399,7 @@ public partial class MainForm : Form
                             if (ofd.ShowDialog(dialog) == DialogResult.OK)
                             {
                                 txt.Text = ofd.FileName;
+                                // 共通画像設定を更新
                                 switch (keyCapture)
                                 {
                                     case "danPlatePath":
@@ -413,12 +415,37 @@ public partial class MainForm : Form
                                         _commonImageSettings.MiniPlatePath = ofd.FileName;
                                         break;
                                 }
+                                // すべての段位の設定を共通画像設定で上書き
+                                foreach (var rank in sortedRanksCapture)
+                                {
+                                    if (!_danImageSettings.TryGetValue(rank, out var danSettings))
+                                    {
+                                        danSettings = new Core.DanGeneratorCore.DanImageSettings();
+                                        _danImageSettings[rank] = danSettings;
+                                    }
+                                    switch (keyCapture)
+                                    {
+                                        case "danPlatePath":
+                                            danSettings.PlatePath = ofd.FileName;
+                                            break;
+                                        case "danPanelSidePath":
+                                            danSettings.PanelSidePath = ofd.FileName;
+                                            break;
+                                        case "danTitlePlatePath":
+                                            danSettings.TitlePlatePath = ofd.FileName;
+                                            break;
+                                        case "danMiniPlatePath":
+                                            danSettings.MiniPlatePath = ofd.FileName;
+                                            break;
+                                    }
+                                }
                             }
                         };
                         
                         btnClear.Click += (s, e) =>
                         {
                             txt.Text = "";
+                            // 共通画像設定をクリア
                             switch (keyCapture)
                             {
                                 case "danPlatePath":
@@ -433,6 +460,28 @@ public partial class MainForm : Form
                                 case "danMiniPlatePath":
                                     _commonImageSettings.MiniPlatePath = null;
                                     break;
+                            }
+                            // すべての段位の設定をクリア
+                            foreach (var rank in sortedRanksCapture)
+                            {
+                                if (_danImageSettings.TryGetValue(rank, out var danSettings))
+                                {
+                                    switch (keyCapture)
+                                    {
+                                        case "danPlatePath":
+                                            danSettings.PlatePath = null;
+                                            break;
+                                        case "danPanelSidePath":
+                                            danSettings.PanelSidePath = null;
+                                            break;
+                                        case "danTitlePlatePath":
+                                            danSettings.TitlePlatePath = null;
+                                            break;
+                                        case "danMiniPlatePath":
+                                            danSettings.MiniPlatePath = null;
+                                            break;
+                                    }
+                                }
                             }
                         };
                         
@@ -557,6 +606,22 @@ public partial class MainForm : Form
                                         currentSettings.MiniPlatePath = ofd.FileName;
                                         break;
                                 }
+                                // 共通画像設定をクリア
+                                switch (keyCapture)
+                                {
+                                    case "plate":
+                                        _commonImageSettings.PlatePath = null;
+                                        break;
+                                    case "danPanelSidePath":
+                                        _commonImageSettings.PanelSidePath = null;
+                                        break;
+                                    case "danTitlePlatePath":
+                                        _commonImageSettings.TitlePlatePath = null;
+                                        break;
+                                    case "danMiniPlatePath":
+                                        _commonImageSettings.MiniPlatePath = null;
+                                        break;
+                                }
                             }
                         };
                         
@@ -582,6 +647,22 @@ public partial class MainForm : Form
                                     break;
                                 case "danMiniPlatePath":
                                     currentSettings.MiniPlatePath = null;
+                                    break;
+                            }
+                            // 共通画像設定をクリア
+                            switch (keyCapture)
+                            {
+                                case "plate":
+                                    _commonImageSettings.PlatePath = null;
+                                    break;
+                                case "danPanelSidePath":
+                                    _commonImageSettings.PanelSidePath = null;
+                                    break;
+                                case "danTitlePlatePath":
+                                    _commonImageSettings.TitlePlatePath = null;
+                                    break;
+                                case "danMiniPlatePath":
+                                    _commonImageSettings.MiniPlatePath = null;
                                     break;
                             }
                         };
