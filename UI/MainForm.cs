@@ -22,6 +22,8 @@ public partial class MainForm : Form
     };
 
     private readonly HashSet<string> _selectedSourceCategories = new(SongSorterCore.SourceCategories, StringComparer.OrdinalIgnoreCase);
+    // AC未収録曲を出力するカテゴリ（null = チェックしない＝全無効、全カテゴリ選択なら全出力）
+    private readonly HashSet<string> _selectedEseCategories = new(SongSorterCore.SourceCategories, StringComparer.OrdinalIgnoreCase);
     private Button? _btnCategorySelect;
     private Button? _btnImageSelect;
     private Button? _btnConvertAssetSelect;
@@ -998,40 +1000,89 @@ public partial class MainForm : Form
         {
             Text = LanguageManager.GetString("CategorySelect"),
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(360, 380),
+            ClientSize = new Size(400, 430),
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MaximizeBox = false,
             MinimizeBox = false
         };
 
-        var checkedList = new CheckedListBox
+        var tabCtrl = new TabControl
         {
             Dock = DockStyle.Top,
-            Height = 290,
-            CheckOnClick = true
+            Height = 340,
+            Font = new Font("Noto Sans", 9F)
         };
 
         var categoryMap = GetCategoryMap();
-        foreach (var cat in categoryMap)
-        {
-            checkedList.Items.Add(cat.DisplayName, _selectedSourceCategories.Contains(cat.InternalName));
-        }
 
-        var btnAll = new Button { Text = LanguageManager.GetString("All"), Location = new Point(12, 300), Size = new Size(80, 30) };
-        var btnNone = new Button { Text = LanguageManager.GetString("None"), Location = new Point(100, 300), Size = new Size(80, 30) };
-        var btnOk = new Button { Text = LanguageManager.GetString("OK"), Location = new Point(190, 340), Size = new Size(75, 30), DialogResult = DialogResult.OK };
-        var btnCancel = new Button { Text = LanguageManager.GetString("Cancel"), Location = new Point(273, 340), Size = new Size(75, 30), DialogResult = DialogResult.Cancel };
+        // ---- タブ1: 収録曲 ----
+        var tabAc = new TabPage("収録曲（AC公式）");
+        var listAc = new CheckedListBox
+        {
+            Dock = DockStyle.Fill,
+            CheckOnClick = true
+        };
+        foreach (var cat in categoryMap)
+            listAc.Items.Add(cat.DisplayName, _selectedSourceCategories.Contains(cat.InternalName));
+        tabAc.Controls.Add(listAc);
+
+        // ---- タブ2: AC未収録曲 ----
+        var tabEse = new TabPage("AC未収録曲");
+        var listEse = new CheckedListBox
+        {
+            Dock = DockStyle.Fill,
+            CheckOnClick = true
+        };
+        foreach (var cat in categoryMap)
+            listEse.Items.Add(cat.DisplayName, _selectedEseCategories.Contains(cat.InternalName));
+        tabEse.Controls.Add(listEse);
+
+        tabCtrl.TabPages.Add(tabAc);
+        tabCtrl.TabPages.Add(tabEse);
+
+        // ---- 全選択 / 全解除 ボタン ----
+        var btnAll = new Button
+        {
+            Text = LanguageManager.GetString("All"),
+            Location = new Point(12, 350),
+            Size = new Size(80, 30)
+        };
+        var btnNone = new Button
+        {
+            Text = LanguageManager.GetString("None"),
+            Location = new Point(100, 350),
+            Size = new Size(80, 30)
+        };
+
+        CheckedListBox CurrentList() => tabCtrl.SelectedIndex == 0 ? listAc : listEse;
 
         btnAll.Click += (s, e) =>
         {
-            for (var i = 0; i < checkedList.Items.Count; i++) checkedList.SetItemChecked(i, true);
+            var list = CurrentList();
+            for (var i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, true);
         };
         btnNone.Click += (s, e) =>
         {
-            for (var i = 0; i < checkedList.Items.Count; i++) checkedList.SetItemChecked(i, false);
+            var list = CurrentList();
+            for (var i = 0; i < list.Items.Count; i++) list.SetItemChecked(i, false);
         };
 
-        dialog.Controls.Add(checkedList);
+        var btnOk = new Button
+        {
+            Text = LanguageManager.GetString("OK"),
+            Location = new Point(210, 390),
+            Size = new Size(75, 30),
+            DialogResult = DialogResult.OK
+        };
+        var btnCancel = new Button
+        {
+            Text = LanguageManager.GetString("Cancel"),
+            Location = new Point(293, 390),
+            Size = new Size(95, 30),
+            DialogResult = DialogResult.Cancel
+        };
+
+        dialog.Controls.Add(tabCtrl);
         dialog.Controls.Add(btnAll);
         dialog.Controls.Add(btnNone);
         dialog.Controls.Add(btnOk);
@@ -1041,19 +1092,25 @@ public partial class MainForm : Form
 
         if (dialog.ShowDialog(this) != DialogResult.OK) return false;
 
+        // 収録曲カテゴリを更新
         _selectedSourceCategories.Clear();
-        for (int i = 0; i < checkedList.Items.Count; i++)
+        for (int i = 0; i < listAc.Items.Count; i++)
         {
-            if (checkedList.GetItemChecked(i))
-            {
+            if (listAc.GetItemChecked(i))
                 _selectedSourceCategories.Add(categoryMap[i].InternalName);
-            }
         }
-
         if (_selectedSourceCategories.Count == 0)
         {
             foreach (var category in SongSorterCore.SourceCategories)
                 _selectedSourceCategories.Add(category);
+        }
+
+        // AC未収録曲カテゴリを更新
+        _selectedEseCategories.Clear();
+        for (int i = 0; i < listEse.Items.Count; i++)
+        {
+            if (listEse.GetItemChecked(i))
+                _selectedEseCategories.Add(categoryMap[i].InternalName);
         }
 
         return true;
@@ -1064,7 +1121,16 @@ public partial class MainForm : Form
         if (_btnCategorySelect == null) return;
         var total = SongSorterCore.SourceCategories.Length;
         var selected = _selectedSourceCategories.Count == 0 ? total : _selectedSourceCategories.Count;
-        _btnCategorySelect.Text = selected >= total ? LanguageManager.GetString("CategoryAll") : string.Format(LanguageManager.GetString("CategoryCount"), selected, total);
+        var eseSelected = _selectedEseCategories.Count;
+        string baseText = selected >= total
+            ? LanguageManager.GetString("CategoryAll")
+            : string.Format(LanguageManager.GetString("CategoryCount"), selected, total);
+        string eseSuffix = eseSelected == 0
+            ? " / 未収録:なし"
+            : eseSelected >= total
+                ? " / 未収録:全て"
+                : $" / 未収録:{eseSelected}";
+        _btnCategorySelect.Text = baseText + eseSuffix;
     }
 
     private IReadOnlyCollection<string> GetSelectedSourceCategories()
@@ -1159,7 +1225,10 @@ public partial class MainForm : Form
                         runId, 
                         GetSelectedSourceCategories(), 
                         Log, 
-                        ct), ct);
+                        ct,
+                        progressAction: null,
+                        preserveEseSongs: true,
+                        preserveEseCategories: _selectedEseCategories.Count > 0 ? _selectedEseCategories.ToArray() : Array.Empty<string>()), ct);
 
                 Log(result.Summary);
             }
@@ -1570,6 +1639,8 @@ public partial class MainForm : Form
                 DanConvertorIndex = txtDanConvertorIndex.Text,
                 DanMiniPlateText = txtDanMiniPlateText.Text,
                 SelectedCategoriesCsv = string.Join("|", GetSelectedSourceCategories()),
+                EseCategoriesCsv = string.Join("|", _selectedEseCategories),
+                PreserveEseSongs = true, // 旧バージョン互換性のため常にtrue
                 ConvertAssetsJson = JsonSerializer.Serialize(_convertAssetAssignments),
                 // 旧バージョン互換性のため残しておく（空で保存）
                 PlateAssignments = new Dictionary<string, string>(),
@@ -1715,6 +1786,26 @@ public partial class MainForm : Form
                 foreach (var category in SongSorterCore.SourceCategories)
                     _selectedSourceCategories.Add(category);
             }
+
+            // AC未収録曲カテゴリを読み込み（旧設定の PreserveEseSongs も考慮）
+            _selectedEseCategories.Clear();
+            var eseRaw = settings.EseCategoriesCsv ?? string.Empty;
+            if (!string.IsNullOrEmpty(eseRaw))
+            {
+                var eseParts = eseRaw.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                foreach (var part in eseParts)
+                {
+                    if (SongSorterCore.SourceCategories.Contains(part, StringComparer.OrdinalIgnoreCase))
+                        _selectedEseCategories.Add(part);
+                }
+            }
+            else if (settings.PreserveEseSongs)
+            {
+                // 旧バージョン互換：PreserveEseSongs=true なら全カテゴリ有効
+                foreach (var category in SongSorterCore.SourceCategories)
+                    _selectedEseCategories.Add(category);
+            }
+            // PreserveEseSongs=false の旧設定 → _selectedEseCategories は空のまま（全無効）
 
             if (!string.IsNullOrEmpty(settings.ConvertAssetsJson))
             {
@@ -1874,6 +1965,8 @@ public partial class MainForm : Form
         public string DanConvertorIndex { get; set; } = "";
         public string DanMiniPlateText { get; set; } = "";
         public string SelectedCategoriesCsv { get; set; } = "";
+        public string EseCategoriesCsv { get; set; } = string.Join("|", SongSorterCore.SourceCategories); // 全カテゴリデフォルト
+        public bool PreserveEseSongs { get; set; } = true; // 旧バージョン互換性のため残す
         public string ConvertAssetsJson { get; set; } = "";
         public string Language { get; set; } = "";
         // 旧バージョン互換性のため残しておく

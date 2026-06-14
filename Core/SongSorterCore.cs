@@ -11,9 +11,11 @@ public sealed record SongSortRunResult(
     int TotalCopied,
     int TotalSkipped,
     int TotalUnmatched,
-    string ReportPath)
+    string ReportPath,
+    int TotalEsePreserved = 0)
 {
-    public string Summary => $"整理完了: コピー {TotalCopied} / スキップ {TotalSkipped}";
+    public string Summary =>
+        $"整理完了: コピー {TotalCopied} / スキップ {TotalSkipped} / AC未収録曲 {TotalEsePreserved}";
 }
 
 public sealed record SongSortReportRow(
@@ -52,7 +54,9 @@ public static class SongSorterCore
         IReadOnlyCollection<string>? selectedSourceCategories,
         Action<string>? logAction = null,
         CancellationToken ct = default,
-        Action<SongSortProgress>? progressAction = null)
+        Action<SongSortProgress>? progressAction = null,
+        bool preserveEseSongs = true,
+        IReadOnlyCollection<string>? preserveEseCategories = null)
     {
         var appDataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SongConverter");
         var exportDir = Path.Combine(appDataDir, "Export");
@@ -102,6 +106,8 @@ public static class SongSorterCore
 
         var exportGroups = LoadExportIndexes(exportDir);
         var reportRows = new ConcurrentBag<SongSortReportRow>();
+        // 公式リストに一致しなかったESE限定曲を保持する別枠バッファ（並列走査中に詰める）
+        var esePreserved = new ConcurrentBag<EsePreservedSong>();
         var parallelOptions = new ParallelOptions
         {
             MaxDegreeOfParallelism = Math.Max(2, Math.Min(Environment.ProcessorCount * 2, 16)),
@@ -345,7 +351,10 @@ public static class SongSorterCore
                 }
                 else
                 {
-                    Interlocked.Increment(ref totalUnmatched);
+                    // 公式曲リストに一致しなかった曲
+                    // 従来はここで破棄していたが、破棄せず別枠（99 AC未収録曲）として保持する。
+                    // 実際のコピーと採番は、全カテゴリ走査後にカテゴリ単位でソートしてから
+                    // ProcessEsePreservedSongs で行う（フェーズ2）。
                     var reason = !titleMatched
                         ? "TitleNotFoundInExport"
                         : !subtitleMatched
@@ -353,7 +362,18 @@ public static class SongSorterCore
                             : !indexResolved
                                 ? "IndexNotResolved"
                                 : "Unknown";
-                    reportRows.Add(new SongSortReportRow(sourceMap.Category, songDir, "Unmatched", reason, reportTitle, reportSubtitle, matchedCategory, matchedKey));
+
+                    // candidates はこの時点で必ず1件以上（空なら前段でreturn済み）
+                    var primary = candidates[0];
+                    esePreserved.Add(new EsePreservedSong(
+                        EseCategory: sourceMap.Category,
+                        SongDir: songDir,
+                        TjaPath: primary.Path,
+                        Wave: primary.Info.Wave,
+                        Title: primary.Info.Title,
+                        Subtitle: primary.Info.Subtitle,
+                        SortKey: primary.TitleNorm,
+                        Reason: reason));
                 }
 
                 var p2 = Interlocked.Increment(ref processedFolders);
@@ -361,13 +381,160 @@ public static class SongSorterCore
             });
         }
 
+        // フェーズ2: アーケード未収録曲をAC側カテゴリごとにソートして別枠出力する。
+        // preserveEseCategories が null → 全カテゴリ出力（preserveEseSongs=trueと同義）。
+        // preserveEseCategories が空セット → 全スキップ（preserveEseSongs=falseと同義）。
+        // preserveEseCategories に値あり → そのカテゴリのみ出力。
+        int totalEsePreserved = 0;
+        var effectiveEseCategories = preserveEseCategories != null && preserveEseCategories.Count > 0
+            ? new HashSet<string>(preserveEseCategories, StringComparer.OrdinalIgnoreCase)
+            : (preserveEseSongs ? null : new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        if (effectiveEseCategories == null || effectiveEseCategories.Count > 0)
+        {
+            var eseGenreMeta = mappings.ToDictionary(
+                m => m.Category,
+                m => (m.BoxTitle, m.BoxGenre, m.BoxExplanation),
+                StringComparer.Ordinal);
+            totalEsePreserved = ProcessEsePreservedSongs(songsRoot, esePreserved, eseGenreMeta, copyPathClaims, reportRows, ct, effectiveEseCategories);
+        }
+
         var reportPath = WriteReportCsv(exportDir, runId, reportRows);
-        return new SongSortRunResult(totalCopied, totalSkipped, totalUnmatched, reportPath);
+        return new SongSortRunResult(totalCopied, totalSkipped, totalUnmatched, reportPath, totalEsePreserved);
     }
 
     private static string ResolveSongsRoot(string selectedFolder)
     {
         return selectedFolder;
+    }
+
+    private const string EseRootFolderName = "99 AC未収録曲";
+    private const string EseRootBoxTitle = "AC未収録曲";
+    private const string EseRootGenre = "ESE";
+    private const string EseRootExplanation = "アーケード版にない曲をあつめたよ!";
+    private const string EseChildTitlePrefix = "【E】 ";
+    private const string EseChildExplanationPrefix = "AC版にない";
+
+    /// <summary>
+    /// 公式リストに一致しなかった曲（＝アーケード版未収録のESE限定曲）を、AC側カテゴリごとに
+    /// 分類・ソートし、「99 AC未収録曲」配下へ別枠出力する。
+    /// 「99 AC未収録曲」直下に各カテゴリのサブフォルダを作り、それぞれにbox.defを置く
+    /// 入れ子構成とする。カテゴリ別box.defの #GENRE・色はAC側と揃え、#TITLE に【E】、
+    /// #EXPLANATION に「AC版にない」を付与する。
+    /// 再実行時の冪等性を担保するため、別枠ツリーは毎回まるごと作り直す。
+    /// </summary>
+    /// <param name="genreMeta">AC側カテゴリ名 → (BoxTitle, BoxGenre, BoxExplanation) の対応表。</param>
+    /// <returns>別枠としてコピーした曲数。</returns>
+    private static int ProcessEsePreservedSongs(
+        string songsRoot,
+        ConcurrentBag<EsePreservedSong> songs,
+        IReadOnlyDictionary<string, (string BoxTitle, string BoxGenre, string BoxExplanation)> genreMeta,
+        ConcurrentDictionary<string, byte> copyPathClaims,
+        ConcurrentBag<SongSortReportRow> reportRows,
+        CancellationToken ct,
+        HashSet<string>? allowedCategories = null)
+    {
+        var eseRoot = Path.Combine(songsRoot, EseRootFolderName);
+
+        if (Directory.Exists(eseRoot))
+        {
+            try { Directory.Delete(eseRoot, recursive: true); }
+            catch { /* 削除に失敗しても処理を続行 */ }
+        }
+
+        // allowedCategories が null → 全カテゴリ出力。空セット → スキップ（呼び出し元でガード済み）。
+        var list = allowedCategories == null
+            ? songs.ToList()
+            : songs.Where(s => allowedCategories.Contains(s.EseCategory)).ToList();
+        if (list.Count == 0) return 0;
+
+        // 親フォルダのbox.def（99 AC未収録曲）。色は指定しない。
+        EnsureBoxDef(eseRoot, EseRootBoxTitle, EseRootGenre, EseRootExplanation, bgColor: null, textColor: null);
+
+        var copied = 0;
+
+        // AC側カテゴリ（採番済みの表示名）ごとに分類
+        var groups = list
+            .GroupBy(
+                s => string.IsNullOrWhiteSpace(s.EseCategory) ? "99 その他" : s.EseCategory,
+                StringComparer.Ordinal)
+            .OrderBy(g => g.Key, StringComparer.Ordinal);
+
+        foreach (var group in groups)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            var genreName = group.Key;
+            var genreDir = Path.Combine(eseRoot, SanitizeFolderName(genreName));
+
+            // カテゴリ別box.defは対応するAC側の #GENRE・色をそのまま流用し、
+            // #TITLE に【E】、#EXPLANATION に「AC版にない」を付与する。
+            // 例: 【E】 ナムコオリジナル / AC版にないナムコオリジナルの曲をあつめたよ!
+            string childTitle, childGenre, childExplanation;
+            if (genreMeta.TryGetValue(genreName, out var meta))
+            {
+                childTitle = EseChildTitlePrefix + meta.BoxTitle;
+                childGenre = meta.BoxGenre;
+                childExplanation = EseChildExplanationPrefix + meta.BoxExplanation;
+            }
+            else
+            {
+                // 対応するAC側カテゴリが無い場合のフォールバック（通常は到達しない）。
+                childTitle = EseChildTitlePrefix + genreName;
+                childGenre = genreName;
+                childExplanation = EseChildExplanationPrefix + genreName + "の曲をあつめたよ!";
+            }
+            EnsureBoxDef(genreDir, childTitle, childGenre, childExplanation);
+
+            var ordered = group
+                .OrderBy(s => s.SortKey, StringComparer.Ordinal)
+                .ThenBy(s => s.Title, StringComparer.Ordinal)
+                .ThenBy(s => s.SongDir, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var index = 1;
+            foreach (var song in ordered)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var num = index.ToString("000");
+                var folderNameCandidates =
+                    BuildFolderNameCandidates(num, song.Title, song.Subtitle, song.TjaPath);
+
+                string? dstSongDir = null;
+                foreach (var folderName in folderNameCandidates)
+                {
+                    var candidatePath = Path.Combine(genreDir, folderName);
+                    if (!copyPathClaims.TryAdd(candidatePath, 0)) continue;
+                    if (Directory.Exists(candidatePath)) continue;
+                    dstSongDir = candidatePath;
+                    break;
+                }
+
+                if (dstSongDir == null)
+                {
+                    reportRows.Add(new SongSortReportRow(
+                        song.EseCategory, song.SongDir, "EsePreservedSkipped", "FolderClaimFailed",
+                        song.Title, song.Subtitle, $"{EseRootFolderName}/{genreName}", song.SortKey));
+                    continue;
+                }
+
+                CopyDirectory(song.SongDir, dstSongDir, song.TjaPath, song.Wave);
+                copied++;
+                index++;
+
+                reportRows.Add(new SongSortReportRow(
+                    song.EseCategory,
+                    song.SongDir,
+                    "EsePreserved",
+                    song.Reason,
+                    song.Title,
+                    song.Subtitle,
+                    $"{EseRootFolderName}/{genreName}",
+                    Path.GetFileName(dstSongDir)));
+            }
+        }
+
+        return copied;
     }
 
     private static Dictionary<string, Dictionary<string, List<(string SubtitleNorm, int Index, string DisplayTitle, string DisplaySubtitle)>>> LoadExportIndexes(string exportDir)
@@ -654,13 +821,16 @@ public static class SongSorterCore
 
     private static readonly object BoxDefLock = new();
 
-    private static void EnsureBoxDef(string dir, string title, string genre, string explanation)
+    private static void EnsureBoxDef(string dir, string title, string genre, string explanation, string? bgColor = "#ff0000", string? textColor = "#ffffff")
     {
         var path = Path.Combine(dir, "box.def");
         lock (BoxDefLock)
         {
             Directory.CreateDirectory(dir);
-            File.WriteAllLines(path, new[] { "#TITLE:" + title, "#GENRE:" + genre, "#EXPLANATION:" + explanation, "#BGCOLOR:#ff0000", "#TEXTCOLOR:#ffffff" });
+            var lines = new List<string> { "#TITLE:" + title, "#GENRE:" + genre, "#EXPLANATION:" + explanation };
+            if (!string.IsNullOrEmpty(bgColor)) lines.Add("#BGCOLOR:" + bgColor);
+            if (!string.IsNullOrEmpty(textColor)) lines.Add("#TEXTCOLOR:" + textColor);
+            File.WriteAllLines(path, lines);
         }
     }
 
@@ -804,4 +974,3 @@ public static class SongSorterCore
         return false;
     }
 }
-
